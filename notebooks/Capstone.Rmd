@@ -1,0 +1,800 @@
+---
+title: "FINALCAPFINAL"
+author: "Kerem Onipede"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r,warning=FALSE}
+rm(list = ls())
+gc()
+
+knitr::opts_chunk$set(echo = TRUE)
+# Load required libraries
+library(glmnet)
+library(caret)
+library(dplyr)
+library(tibble)
+
+
+```
+
+```{r, ,warning=FALSE}
+library(glmnet)       # Lasso Logistic Regression
+library(caret)        # Data partitioning and model evaluation
+library(dplyr)        # Data manipulation
+library(randomForest) # Random Forest model
+library(MASS)         # Stepwise logistic regression (stepAIC)
+
+# Load the dataset
+data <- read.csv('data.csv')
+
+# Quick look at variable types to check for any necessary transformations
+variable_info <- data.frame(
+  Variable = names(data),
+  Type = sapply(data, class)
+)
+print(variable_info)
+
+# Convert the target variable to binary (1 = Canceled, 0 = Not Canceled)
+data$booking_status <- as.factor(ifelse(data$booking_status == "Canceled", 1, 0))
+
+# Drop unnecessary columns that don't add predictive value
+data$Booking_ID <- NULL       # Unique identifier, not useful for modeling
+data$arrival_date <- NULL    
+data$arrival_year <- NULL# Exact date is too granular, using arrival month instead
+data$arrival_month <- as.factor(data$arrival_month)  # Convert month to categorical
+data$market_segment_type <- relevel(as.factor(data$market_segment_type), ref = "Online")
+
+# Convert categorical variables to factors
+categorical_vars <- c("type_of_meal_plan", "room_type_reserved", "market_segment_type")
+data[categorical_vars] <- lapply(data[categorical_vars], as.factor)
+
+# Log transformation for skewed numerical variables (helps with normalizing the data)
+data$log_lead_time <- log1p(data$lead_time)                # log(x+1) avoids log(0)
+data$log_avg_price_per_room <- log1p(data$avg_price_per_room)
+
+# Remove the original columns after applying log transformations
+data$lead_time <- NULL
+data$avg_price_per_room <- NULL
+
+# Split dataset into training (80%) and testing (20%) sets
+set.seed(42)
+trainIndex <- createDataPartition(data$booking_status, p = 0.8, list = FALSE)
+train_data <- data[trainIndex, ]
+test_data  <- data[-trainIndex, ]
+
+###############################################################################
+#   LASSO LOGISTIC REGRESSION (Feature Selection & Regularization)
+###############################################################################
+
+# Convert categorical variables into dummy variables
+x_train <- model.matrix(booking_status ~ ., train_data)[, -1]
+y_train <- train_data$booking_status
+
+x_test  <- model.matrix(booking_status ~ ., test_data)[, -1]
+y_test  <- test_data$booking_status
+
+```
+
+
+```{r,warning=FALSE}
+set.seed(42)
+# Run cross-validation to determine the optimal lambda values
+cv_lasso <- cv.glmnet(x_train, y_train, family = "binomial", alpha = 1)
+
+# Extract lambda_min (the value that gives minimum cross-validation error)
+lambda_min <- cv_lasso$lambda.min
+
+# Fit the LASSO model using lambda_min
+lasso_min_model <- glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = lambda_min)
+
+# Make predictions on the test set
+pred_probs_min <- predict(lasso_min_model, newx = x_test, type = "response")
+pred_labels_min <- ifelse(pred_probs_min > 0.5, 1, 0)
+
+# Create confusion matrix for the λₘᵢₙ model
+conf_matrix_min <- confusionMatrix(as.factor(pred_labels_min), as.factor(y_test))
+
+# Extract coefficients (excluding the intercept) and order them by descending absolute value
+coeffs_min <- coef(lasso_min_model)
+coeffs_min_df <- as.data.frame(as.matrix(coeffs_min))
+coeffs_min_df <- tibble::rownames_to_column(coeffs_min_df, var = "Variable")
+colnames(coeffs_min_df)[2] <- "Coefficient"
+coeffs_min_df <- coeffs_min_df[-1, ]  # Remove the intercept row
+coeffs_min_df <- coeffs_min_df %>% arrange(desc(abs(Coefficient)))
+
+```
+```{r,warning=FALSE}
+# Extract lambda_min.1se (a more regularized, conservative value)
+lambda_min1se <- cv_lasso$lambda.1se
+
+# Fit the LASSO model using lambda_min.1se
+lasso_min1se_model <- glmnet(x_train, y_train, family = "binomial", alpha = 1, lambda = lambda_min1se)
+
+# Make predictions on the test set
+pred_probs_min1se <- predict(lasso_min1se_model, newx = x_test, type = "response")
+pred_labels_min1se <- ifelse(pred_probs_min1se > 0.5, 1, 0)
+
+# Create confusion matrix for the λₘᵢₙ.₁ₛₑ model
+conf_matrix_min1se <- confusionMatrix(as.factor(pred_labels_min1se), as.factor(y_test))
+
+# Extract coefficients (excluding the intercept) and order them by descending absolute value
+coeffs_min1se <- coef(lasso_min1se_model)
+coeffs_min1se_df <- as.data.frame(as.matrix(coeffs_min1se))
+coeffs_min1se_df <- tibble::rownames_to_column(coeffs_min1se_df, var = "Variable")
+colnames(coeffs_min1se_df)[2] <- "Coefficient"
+coeffs_min1se_df <- coeffs_min1se_df[-1, ]  # Remove the intercept row
+coeffs_min1se_df <- coeffs_min1se_df %>% arrange(desc(abs(Coefficient)))
+
+```
+```{r}
+cat("## LASSO Model Using λₘᵢₙ\n")
+cat("Lambda (λₘᵢₙ):", lambda_min, "\n\n")
+cat("### Coefficients (Ordered by Absolute Value)\n")
+print(coeffs_min_df, row.names = FALSE)
+cat("\n### Confusion Matrix\n")
+print(conf_matrix_min)
+cat("\n### Model Summary\n")
+print(summary(lasso_min_model))
+
+cat("\n\n## LASSO Model Using λₘᵢₙ.₁ₛₑ\n")
+cat("Lambda (λₘᵢₙ.₁ₛₑ):", lambda_min1se, "\n\n")
+cat("### Coefficients (Ordered by Absolute Value)\n")
+print(coeffs_min1se_df, row.names = FALSE)
+cat("\n### Confusion Matrix\n")
+print(conf_matrix_min1se)
+cat("\n### Model Summary\n")
+print(summary(lasso_min1se_model))
+
+```
+```{r}
+# Install packages if not already installed
+if (!require(knitr)) install.packages("knitr")
+if (!require(kableExtra)) install.packages("kableExtra")
+options(scipen = 99999999999999999999999999)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+# Create a data frame with the summary metrics
+lasso_summary <- data.frame(
+  Metric = c("Lambda", "Accuracy", "Sensitivity", "Specificity", 
+             "Positive Predictive Value", "Negative Predictive Value", 
+             "Balanced Accuracy"),
+  `LASSO (λmin)` = c("4.55 x 10⁻⁵", "80.51%", "88.03%", "65.08%", "83.80%", "72.60%", "76.55%"),
+  `LASSO (λmin.1se)` = c("1.30 x 10⁻³", "80.51%", "88.44%", "64.24%", "83.54%", "73.03%", "76.34%"),
+  check.names = FALSE
+)
+
+# Create and style the table
+lasso_summary %>%
+  kable("html", caption = "LASSO Model Comparison", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+```{r}
+# Install packages if not already installed
+if (!require(knitr)) install.packages("knitr")
+if (!require(kableExtra)) install.packages("kableExtra")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(tidyr)) install.packages("tidyr")
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+# Extract coefficients from the LASSO (λmin.1se) model
+coeffs_min1se <- coef(lasso_min1se_model)
+
+# Convert coefficients to a data frame, add variable names, remove intercept
+coeffs_min1se_df <- as.data.frame(as.matrix(coeffs_min1se))
+coeffs_min1se_df <- tibble::rownames_to_column(coeffs_min1se_df, var = "Variable")
+colnames(coeffs_min1se_df)[2] <- "Coefficient"
+coeffs_min1se_df <- coeffs_min1se_df[-1, ]  # remove intercept row
+
+# Round coefficients to 4 decimals
+coeffs_min1se_df$Coefficient <- round(coeffs_min1se_df$Coefficient, 4)
+
+# Sort by descending absolute value
+coeffs_min1se_df <- coeffs_min1se_df %>% arrange(desc(abs(Coefficient)))
+
+# Split into two halves
+half_point <- ceiling(nrow(coeffs_min1se_df) / 2)
+
+df_left <- coeffs_min1se_df[1:half_point, ]
+df_right <- coeffs_min1se_df[(half_point + 1):nrow(coeffs_min1se_df), ]
+
+# Make sure both sides have equal rows
+if (nrow(df_left) > nrow(df_right)) {
+  df_right[nrow(df_left), ] <- NA
+}
+
+# Combine columns side-by-side
+combined_df <- bind_cols(df_left, df_right)
+colnames(combined_df) <- c("Variable", "Coefficient", "Variable", "Coefficient")
+
+# Produce formatted HTML table
+combined_df %>%
+  kable("html", caption = "LASSO (λmin.1se) Coefficients", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+```{r}
+# Install packages if not already installed
+if (!require(knitr)) install.packages("knitr")
+if (!require(kableExtra)) install.packages("kableExtra")
+if (!require(dplyr)) install.packages("dplyr")
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+# Extract coefficients from the LASSO (λmin.1se) model
+coeffs_min1se <- coef(lasso_min1se_model)
+
+# Convert coefficients to a data frame, add variable names, and remove the intercept
+coeffs_min1se_df <- as.data.frame(as.matrix(coeffs_min1se))
+coeffs_min1se_df <- tibble::rownames_to_column(coeffs_min1se_df, var = "Variable")
+colnames(coeffs_min1se_df)[2] <- "Coefficient"
+coeffs_min1se_df <- coeffs_min1se_df[-1, ]  # remove intercept row
+
+# Round coefficients to 4 decimal places
+coeffs_min1se_df$Coefficient <- round(coeffs_min1se_df$Coefficient, 4)
+
+# Sort by descending absolute value of the coefficient
+coeffs_min1se_df <- coeffs_min1se_df %>% arrange(desc(abs(Coefficient)))
+
+# Produce a nicely formatted HTML table
+coeffs_min1se_df %>% 
+  kable("html", caption = "LASSO (λmin.1se) Coefficients", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+```{r calibration-residuals-confmatrix, warning=FALSE, message=FALSE}
+# ---------------------------
+# Load required packages
+# ---------------------------
+if (!require(caret)) install.packages("caret")
+if (!require(glmnet)) install.packages("glmnet")
+if (!require(knitr)) install.packages("knitr")
+if (!require(kableExtra)) install.packages("kableExtra")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(tidyr)) install.packages("tidyr")
+
+library(caret)
+library(glmnet)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+# ---------------------------
+# 1. CALIBRATION PLOT
+# ---------------------------
+# Predict probabilities on the test set (class = 1)
+pred_probs <- predict(lasso_min1se_model, newx = x_test, type = "response")
+
+# Prepare data for calibration
+cal_data <- data.frame(
+  obs  = as.factor(test_data$booking_status),  # Actual (0 or 1)
+  pred = as.vector(pred_probs)                 # Predicted probability of 1
+)
+
+# Convert obs to factor with levels 0 and 1
+cal_data$obs <- factor(cal_data$obs, levels = c("0", "1"))
+
+# Create calibration object (using 10 bins)
+cal_obj <- calibration(obs ~ pred, data = cal_data, cuts = 10, class = "1")
+
+# Plot calibration curve
+xyplot(cal_obj,
+       auto.key = list(columns = 2),
+       main = "Calibration Plot (LASSO 1se)",
+       xlab = "Mean Predicted Probability",
+       ylab = "Observed Frequency")
+
+# ---------------------------
+# 2. RESIDUAL PLOT
+# ---------------------------
+# Predict probabilities on training set
+train_probs  <- predict(lasso_min1se_model, newx = x_train, type = "response")
+train_actual <- as.numeric(as.character(train_data$booking_status))
+
+# Compute approximate residuals = (actual - predicted probability)
+train_resid <- train_actual - train_probs
+
+# Plot residuals against log_lead_time
+plot(train_data$log_lead_time, train_resid,
+     xlab = "Log Lead Time",
+     ylab = "Residuals (Actual - Predicted)",
+     main = "Residual Plot for Log Lead Time (LASSO 1se)",
+     col = "blue", pch = 19)
+abline(h = 0, col = "red", lwd = 2)
+
+# ---------------------------
+# 3. CONFUSION MATRIX (Nicely Formatted)
+# ---------------------------
+# Class predictions (threshold = 0.5)
+pred_class <- ifelse(pred_probs > 0.5, "1", "0")
+
+# Build confusion matrix using caret
+cm <- confusionMatrix(factor(pred_class), factor(test_data$booking_status))
+
+# Extract the raw counts as a data frame
+df_conf <- as.data.frame(cm$table)
+
+# Pivot to wide format for a nice layout
+df_conf_wide <- df_conf %>%
+  pivot_wider(names_from = Reference, values_from = Freq) %>%
+  rename("Prediction" = Prediction)
+
+# Print the confusion matrix as a table
+kable(df_conf_wide, caption = "Confusion Matrix Counts", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+# Optionally, show key metrics (Accuracy, Sensitivity, Specificity, etc.)
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Sensitivity", "Specificity", 
+             "Pos Pred Value", "Neg Pred Value", "Balanced Accuracy"),
+  Value = c(
+    round(cm$overall["Accuracy"], 4),
+    round(cm$byClass["Sensitivity"], 4),
+    round(cm$byClass["Specificity"], 4),
+    round(cm$byClass["Pos Pred Value"], 4),
+    round(cm$byClass["Neg Pred Value"], 4),
+    round(cm$byClass["Balanced Accuracy"], 4)
+  )
+)
+
+kable(metrics_df, caption = "Confusion Matrix Metrics: LASSO", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+
+```
+
+```{r random-forest-analysis, warning=FALSE, message=FALSE}
+# -------------------------------
+# Load required packages
+# -------------------------------
+if (!require(randomForest)) install.packages("randomForest")
+if (!require(caret)) install.packages("caret")
+if (!require(knitr)) install.packages("knitr")
+if (!require(kableExtra)) install.packages("kableExtra")
+if (!require(dplyr)) install.packages("dplyr")
+if (!require(tidyr)) install.packages("tidyr")
+
+library(randomForest)
+library(caret)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+set.seed(42)
+
+# -------------------------------
+# 1. Train Final Random Forest Model
+# -------------------------------
+# Use mtry = 4 as provided (best of 4)
+rf_model <- randomForest(
+  booking_status ~ .,
+  data       = train_data,
+  mtry       = 4,
+  ntree      = 100,
+  importance = TRUE
+)
+
+# -------------------------------
+# 2. VARIABLE IMPORTANCE
+# -------------------------------
+var_imp <- importance(rf_model)
+importance_df <- data.frame(
+  Variable = rownames(var_imp),
+  MeanDecreaseGini = var_imp[,"MeanDecreaseGini"]
+) %>% arrange(desc(MeanDecreaseGini))
+
+importance_df %>% 
+  kable("html", caption = "Random Forest Variable Importance", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+# -------------------------------
+# 3. CONFUSION MATRIX & PERFORMANCE METRICS (Test Data)
+# -------------------------------
+# Predict classes on test data
+pred_class <- predict(rf_model, newdata = test_data, type = "class")
+
+# Generate confusion matrix using caret
+cm <- confusionMatrix(pred_class, test_data$booking_status)
+
+# 3A. Confusion Matrix Counts in a Table
+df_conf <- as.data.frame(cm$table)
+df_conf_wide <- df_conf %>%
+  pivot_wider(names_from = Reference, values_from = Freq) %>%
+  rename("Prediction" = Prediction)
+
+df_conf_wide %>% 
+  kable("html", caption = "Confusion Matrix Counts", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+# 3B. Key Performance Metrics in a Table
+metrics_df <- data.frame(
+  Metric = c("Accuracy", "Sensitivity", "Specificity", 
+             "Pos Pred Value", "Neg Pred Value", "Balanced Accuracy"),
+  Value = c(
+    round(cm$overall["Accuracy"], 4),
+    round(cm$byClass["Sensitivity"], 4),
+    round(cm$byClass["Specificity"], 4),
+    round(cm$byClass["Pos Pred Value"], 4),
+    round(cm$byClass["Neg Pred Value"], 4),
+    round(cm$byClass["Balanced Accuracy"], 4)
+  )
+)
+
+metrics_df %>% 
+  kable("html", caption = "Random Forest Performance Metrics", align = "c") %>%
+  kable_styling(full_width = FALSE, position = "center", 
+                bootstrap_options = c("striped", "hover", "condensed"))
+
+# -------------------------------
+# 4. CALIBRATION PLOT (Test Data)
+# -------------------------------
+# Get predicted probabilities for class "1"
+pred_probs <- predict(rf_model, newdata = test_data, type = "prob")[, "1"]
+
+# Create data frame for calibration
+cal_data <- data.frame(
+  obs  = as.factor(test_data$booking_status),
+  pred = pred_probs
+)
+cal_data$obs <- factor(cal_data$obs, levels = c("0", "1"))
+
+# Use caret's calibration function with 10 bins
+cal_obj <- calibration(obs ~ pred, data = cal_data, cuts = 10, class = "1")
+
+# Plot the calibration curve
+print(
+  xyplot(cal_obj,
+         auto.key = list(columns = 2),
+         main = "Calibration Plot (Random Forest)",
+         xlab = "Mean Predicted Probability",
+         ylab = "Observed Frequency")
+)
+
+```
+
+```{r, warning=FALSE}
+# ---------------------------
+# Threshold Tuning for LASSO (λmin.1se) and Random Forest on the test set
+# ---------------------------
+
+library(caret)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(lattice)
+
+# Use the predictions already computed:
+# For LASSO (λmin.1se): pred_probs_min1se (numeric vector), y_test (factor with levels "0","1")
+# For Random Forest: We'll compute rf probabilities below
+
+# For Random Forest predicted probabilities for class "1":
+pred_probs_rf <- predict(rf_model, newdata = test_data, type = "prob")[, "1"]
+
+# Define candidate thresholds from 0.01 to 0.99
+threshold_candidates <- seq(0.01, 0.99, by = 0.01)
+
+## A. LASSO Threshold Tuning (F1 optimization)
+best_thresh_lasso <- 0.5
+best_f1_lasso <- 0
+
+for(th in threshold_candidates) {
+  lasso_preds <- ifelse(pred_probs_min1se >= th, "1", "0")
+  lasso_preds <- factor(lasso_preds, levels = c("0", "1"))
+  cm_lasso <- confusionMatrix(lasso_preds, factor(y_test, levels = c("0","1")), positive = "1")
+  
+  precision <- cm_lasso$byClass["Pos Pred Value"]
+  recall <- cm_lasso$byClass["Sensitivity"]
+  # Safeguard: if precision or recall is NA or their sum is zero, set F1 to 0
+  if (is.na(precision) || is.na(recall) || (precision + recall) == 0) {
+    f1 <- 0
+  } else {
+    f1 <- 2 * (precision * recall) / (precision + recall)
+  }
+  
+  if(f1 > best_f1_lasso) {
+    best_f1_lasso <- f1
+    best_thresh_lasso <- th
+  }
+}
+
+cat("LASSO (λmin.1se) - Best cutoff threshold on test:", best_thresh_lasso, "\n")
+cat("LASSO (λmin.1se) - Best F1 on test:", round(best_f1_lasso, 4), "\n\n")
+
+## B. Random Forest Threshold Tuning (F1 optimization)
+best_thresh_rf <- 0.5
+best_f1_rf <- 0
+
+for(th in threshold_candidates) {
+  rf_preds <- ifelse(pred_probs_rf >= th, "1", "0")
+  rf_preds <- factor(rf_preds, levels = c("0", "1"))
+  cm_rf <- confusionMatrix(rf_preds, factor(test_data$booking_status, levels = c("0","1")), positive = "1")
+  
+  precision <- cm_rf$byClass["Pos Pred Value"]
+  recall <- cm_rf$byClass["Sensitivity"]
+  if (is.na(precision) || is.na(recall) || (precision + recall) == 0) {
+    f1 <- 0
+  } else {
+    f1 <- 2 * (precision * recall) / (precision + recall)
+  }
+  
+  if(f1 > best_f1_rf) {
+    best_f1_rf <- f1
+    best_thresh_rf <- th
+  }
+}
+
+cat("Random Forest - Best cutoff threshold on test:", best_thresh_rf, "\n")
+cat("Random Forest - Best F1 on test:", round(best_f1_rf, 4), "\n\n")
+
+# ---------------------------
+# Display Confusion Matrices & Key Metrics at the Tuned Thresholds
+# ---------------------------
+
+# Function to print confusion matrix and performance metrics nicely
+print_cm_metrics <- function(prob, actual, threshold, model_name = "") {
+  preds <- ifelse(prob >= threshold, "1", "0")
+  preds <- factor(preds, levels = c("0", "1"))
+  actual <- factor(actual, levels = c("0", "1"))
+  
+  cm <- confusionMatrix(preds, actual, positive = "1")
+  
+  # Confusion matrix counts
+  df_conf <- as.data.frame(cm$table)
+  df_conf_wide <- df_conf %>%
+    pivot_wider(names_from = Reference, values_from = Freq) %>%
+    rename("Prediction" = Prediction)
+  
+  cat("\n**", model_name, "- Threshold =", threshold, "**\n")
+  print(
+    kable(df_conf_wide, caption = paste(model_name, "- Confusion Matrix Counts"), align = "c") %>%
+      kable_styling(full_width = FALSE, position = "center", 
+                    bootstrap_options = c("striped", "hover", "condensed"))
+  )
+  
+  # Key performance metrics
+  prec <- cm$byClass["Pos Pred Value"]
+  rec <- cm$byClass["Sensitivity"]
+  if (is.na(prec) || is.na(rec) || (prec + rec) == 0) {
+    f1 <- 0
+  } else {
+    f1 <- 2 * prec * rec / (prec + rec)
+  }
+  
+  metrics_df <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", "Pos Pred Value", "Neg Pred Value", "F1 Score", "Balanced Accuracy"),
+    Value = c(
+      round(cm$overall["Accuracy"], 4),
+      round(cm$byClass["Sensitivity"], 4),
+      round(cm$byClass["Specificity"], 4),
+      round(cm$byClass["Pos Pred Value"], 4),
+      round(cm$byClass["Neg Pred Value"], 4),
+      round(f1, 4),
+      round(cm$byClass["Balanced Accuracy"], 4)
+    )
+  )
+  
+  print(
+    kable(metrics_df, caption = paste(model_name, "- Performance Metrics"), align = "c") %>%
+      kable_styling(full_width = FALSE, position = "center", 
+                    bootstrap_options = c("striped", "hover", "condensed"))
+  )
+}
+
+# Print LASSO confusion matrix and metrics at best threshold
+print_cm_metrics(pred_probs_min1se, y_test, best_thresh_lasso, model_name = "LASSO (λmin.1se)")
+
+# Print Random Forest confusion matrix and metrics at best threshold
+print_cm_metrics(pred_probs_rf, test_data$booking_status, best_thresh_rf, model_name = "Random Forest")
+
+# ---------------------------
+# Calibration Plots (using raw predicted probabilities)
+# ---------------------------
+
+# Calibration plot for LASSO (λmin.1se)
+cal_data_lasso <- data.frame(
+  obs = factor(y_test, levels = c("0", "1")),
+  pred = as.vector(pred_probs_min1se)
+)
+cal_obj_lasso <- calibration(obs ~ pred, data = cal_data_lasso, cuts = 10, class = "1")
+print(
+  xyplot(cal_obj_lasso,
+         auto.key = list(columns = 2),
+         main = "Calibration Plot - LASSO (λmin.1se)",
+         xlab = "Mean Predicted Probability",
+         ylab = "Observed Frequency")
+)
+
+# Calibration plot for Random Forest
+cal_data_rf <- data.frame(
+  obs = factor(test_data$booking_status, levels = c("0", "1")),
+  pred = pred_probs_rf
+)
+cal_obj_rf <- calibration(obs ~ pred, data = cal_data_rf, cuts = 10, class = "1")
+print(
+  xyplot(cal_obj_rf,
+         auto.key = list(columns = 2),
+         main = "Calibration Plot - Random Forest",
+         xlab = "Mean Predicted Probability",
+         ylab = "Observed Frequency")
+)
+
+```
+
+```{r rocr-threshold-tuning-youden, warning=FALSE, message=FALSE}
+# Load ROCR if not already loaded
+if(!require(ROCR)) install.packages("ROCR")
+library(ROCR)
+
+# ---------------------------
+# A. LASSO (λmin.1se) Threshold Tuning using Youden's Index via ROCR
+# ---------------------------
+# Create ROCR prediction object for LASSO
+pred_obj_lasso <- prediction(pred_probs_min1se, as.numeric(as.character(y_test)))
+
+# Get ROC performance (TPR and FPR) as a function of cutoff
+perf_roc_lasso <- performance(pred_obj_lasso, measure = "tpr", x.measure = "fpr")
+
+# Extract TPR, FPR, and cutoff values
+tpr_lasso <- perf_roc_lasso@y.values[[1]]
+fpr_lasso <- perf_roc_lasso@x.values[[1]]
+cutoffs_lasso <- perf_roc_lasso@alpha.values[[1]]
+
+# Compute Youden's Index (TPR - FPR) for each cutoff
+youden_lasso <- tpr_lasso - fpr_lasso
+
+# Find the cutoff that maximizes Youden's Index
+best_index_lasso <- which.max(youden_lasso)
+best_thresh_lasso <- cutoffs_lasso[best_index_lasso]
+
+cat("LASSO (λmin.1se) - Best cutoff threshold on test (maximizing Youden's Index):", 
+    best_thresh_lasso, "\n\n")
+
+# ---------------------------
+# B. Random Forest Threshold Tuning using Youden's Index via ROCR
+# ---------------------------
+# Create ROCR prediction object for Random Forest
+pred_obj_rf <- prediction(pred_probs_rf, as.numeric(as.character(test_data$booking_status)))
+
+# Get ROC performance (TPR and FPR) as a function of cutoff
+perf_roc_rf <- performance(pred_obj_rf, measure = "tpr", x.measure = "fpr")
+
+# Extract TPR, FPR, and cutoff values
+tpr_rf <- perf_roc_rf@y.values[[1]]
+fpr_rf <- perf_roc_rf@x.values[[1]]
+cutoffs_rf <- perf_roc_rf@alpha.values[[1]]
+
+# Compute Youden's Index (TPR - FPR) for each cutoff
+youden_rf <- tpr_rf - fpr_rf
+
+# Find the cutoff that maximizes Youden's Index
+best_index_rf <- which.max(youden_rf)
+best_thresh_rf <- cutoffs_rf[best_index_rf]
+
+cat("Random Forest - Best cutoff threshold on test (maximizing Youden's Index):", 
+    best_thresh_rf, "\n\n")
+
+# ---------------------------
+# C. Define a helper function to display Confusion Matrices and Key Metrics
+# ---------------------------
+library(caret)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+
+print_cm_metrics <- function(prob, actual, threshold, model_name = "") {
+  preds <- ifelse(prob >= threshold, "1", "0")
+  preds <- factor(preds, levels = c("0", "1"))
+  actual <- factor(actual, levels = c("0", "1"))
+  
+  cm <- confusionMatrix(preds, actual, positive = "1")
+  
+  # Confusion matrix counts
+  df_conf <- as.data.frame(cm$table)
+  df_conf_wide <- df_conf %>%
+    pivot_wider(names_from = Reference, values_from = Freq) %>%
+    rename("Prediction" = Prediction)
+  
+  cat("\n**", model_name, "- Confusion Matrix (Threshold =", threshold, ")**\n")
+  print(
+    kable(df_conf_wide, caption = paste(model_name, "- Confusion Matrix Counts"), align = "c") %>%
+      kable_styling(full_width = FALSE, position = "center", 
+                    bootstrap_options = c("striped", "hover", "condensed"))
+  )
+  
+  # Key performance metrics
+  prec <- cm$byClass["Pos Pred Value"]
+  rec  <- cm$byClass["Sensitivity"]
+  if (is.na(prec) || is.na(rec) || (prec + rec) == 0) {
+    f1 <- 0
+  } else {
+    f1 <- 2 * prec * rec / (prec + rec)
+  }
+  
+  metrics_df <- data.frame(
+    Metric = c("Accuracy", "Sensitivity", "Specificity", 
+               "Pos Pred Value", "Neg Pred Value", "F1 Score", "Balanced Accuracy"),
+    Value = c(
+      round(cm$overall["Accuracy"], 4),
+      round(cm$byClass["Sensitivity"], 4),
+      round(cm$byClass["Specificity"], 4),
+      round(cm$byClass["Pos Pred Value"], 4),
+      round(cm$byClass["Neg Pred Value"], 4),
+      round(f1, 4),
+      round(cm$byClass["Balanced Accuracy"], 4)
+    )
+  )
+  
+  print(
+    kable(metrics_df, caption = paste(model_name, "- Performance Metrics"), align = "c") %>%
+      kable_styling(full_width = FALSE, position = "center", 
+                    bootstrap_options = c("striped", "hover", "condensed"))
+  )
+}
+
+# ---------------------------
+# D. Display Confusion Matrices and Metrics at the Tuned Thresholds
+# ---------------------------
+
+# For LASSO (λmin.1se) using the ROCR-based threshold:
+print_cm_metrics(pred_probs_min1se, y_test, best_thresh_lasso, model_name = "LASSO (λmin.1se)")
+
+# For Random Forest using the ROCR-based threshold:
+print_cm_metrics(pred_probs_rf, test_data$booking_status, best_thresh_rf, model_name = "Random Forest")
+
+# ---------------------------
+# E. Calibration Plots
+# ---------------------------
+# Although ROCR does not provide a calibration plot, we can create one manually
+
+# For LASSO:
+bins_lasso <- cut(pred_probs_min1se, breaks = 10)
+obs_prop_lasso <- tapply(as.numeric(as.character(y_test)), bins_lasso, mean)
+pred_mean_lasso <- tapply(pred_probs_min1se, bins_lasso, mean)
+
+plot(pred_mean_lasso, obs_prop_lasso, xlim = c(0,1), ylim = c(0,1),
+     xlab = "Mean Predicted Probability", ylab = "Observed Proportion",
+     main = "Calibration Plot - LASSO (λmin.1se)", pch = 19, col = "blue")
+abline(0,1, col = "red", lwd = 2)
+
+# For Random Forest:
+bins_rf <- cut(pred_probs_rf, breaks = 10)
+obs_prop_rf <- tapply(as.numeric(as.character(test_data$booking_status)), bins_rf, mean)
+pred_mean_rf <- tapply(pred_probs_rf, bins_rf, mean)
+
+plot(pred_mean_rf, obs_prop_rf, xlim = c(0,1), ylim = c(0,1),
+     xlab = "Mean Predicted Probability", ylab = "Observed Proportion",
+     main = "Calibration Plot - Random Forest", pch = 19, col = "darkgreen")
+abline(0,1, col = "red", lwd = 2)
+```
+
+```{r, warning=FALSE}
+lasso_min1se_model$beta
+summary(lasso_min1se_model)
+```
+
+```{r, warning=FALSE}
+lasso_min1se_model$dev.ratio
+lasso_min1se_model
+rf_model$proximity
+```
